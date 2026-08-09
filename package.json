@@ -1,0 +1,27 @@
+{
+  "name": "sorumluluk-risk-degerlendirme",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Sorumluluk Underwriter'ı için yapay zeka destekli risk değerlendirme aracı",
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "lint": "next lint"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.68.0",
+    "@supabase/supabase-js": "^2.58.0",
+    "mammoth": "^1.11.0",
+    "next": "^15.5.4",
+    "react": "^19.2.0",
+    "react-dom": "^19.2.0",
+    "xlsx": "^0.18.5"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "@types/react": "^19.2.0",
+    "@types/react-dom": "^19.2.0",
+    "typescript": "^5.7.0"
+  }
+}
