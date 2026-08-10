@@ -64,6 +64,7 @@ const SYSTEM_PROMPT = [
   'Tüm kaynaklardan gelen bilgileri BİRLEŞTİREREK objektif bir risk analizi yap. Bulamadığın bilgiler için "bilgi bulunamadı" de; asla uydurma.',
   'risk_skoru 0-100 arasında olsun (0 = en düşük risk, 100 = en yüksek risk). risk_derecesi bununla tutarlı olsun: 0-33 Düşük, 34-66 Orta, 67-100 Yüksek.',
   'rapor_markdown alanına, tüm bölümleri içeren, başlıklandırılmış, okunaklı tam raporu Markdown formatında yaz.',
+  'Raporu ÖZLÜ tut: her bölüm birkaç net cümle olsun, rapor_markdown yaklaşık 600-800 kelimeyi aşmasın. Underwriter hızlı karar vermek için okuyor; dolgu cümle kullanma.',
   'Tüm çıktı Türkçe olmalıdır.',
 ].join('\n');
 
@@ -243,10 +244,11 @@ export async function runRiskAssessment(input: AssessInput): Promise<AssessResul
     // 16k üzeri çıktı için SDK streaming gerektirir; stream + finalMessage kullanıyoruz.
     max_tokens: 32000,
     system: SYSTEM_PROMPT,
-    tools: [{ type: 'web_search_20260209', name: 'web_search', max_uses: 5 }],
+    tools: [{ type: 'web_search_20260209', name: 'web_search', max_uses: 4 }],
     output_config: {
-      // 'medium' efor + sınırlı web araması, analizi arka plan süre limiti (300s) içinde tutar
-      effort: 'medium',
+      // 'low' efor + sınırlı web araması + özlü rapor talimatı:
+      // analiz Vercel'in 300 sn arka plan süre limitine güvenle sığmalı
+      effort: 'low',
       format: { type: 'json_schema', schema: REPORT_SCHEMA },
     },
   };
