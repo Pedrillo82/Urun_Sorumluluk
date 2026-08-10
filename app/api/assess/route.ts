@@ -1,33 +1,27 @@
-import { NextRequest, NextResponse } from 'next/server';
+import { NextRequest, NextResponse, after } from 'next/server';
 import { getSupabaseAdmin, getStorageBucket } from '@/lib/supabase';
 import { prepareFile, type PreparedFile } from '@/lib/extract';
 import { runRiskAssessment } from '@/lib/anthropic';
 import { isCoverageKey } from '@/lib/coverages';
-import type { StoredFile } from '@/lib/types';
+import type { StoredFile, CoverageKey } from '@/lib/types';
 
 export const runtime = 'nodejs';
-export const maxDuration = 300; // saniye — AI + web araştırması uzun sürebilir
+export const maxDuration = 300; // saniye — arka plan analizi bu süre içinde tamamlanır
 
-const MAX_FILE_BYTES = 25 * 1024 * 1024; // dosya başına 25 MB
+const MAX_FILE_BYTES = 4 * 1024 * 1024; // Vercel istek gövdesi ~4.5MB; dosya başına 4MB sınırı
 
 export async function POST(req: NextRequest) {
-  let assessmentId: string | null = null;
-  const supabase = (() => {
-    try {
-      return getSupabaseAdmin();
-    } catch (e) {
-      return null;
-    }
-  })();
+  let supabase;
+  try {
+    supabase = getSupabaseAdmin();
+  } catch {
+    return NextResponse.json(
+      { error: 'Sunucu yapılandırması eksik: Supabase bağlantısı kurulamadı.' },
+      { status: 500 }
+    );
+  }
 
   try {
-    if (!supabase) {
-      return NextResponse.json(
-        { error: 'Sunucu yapılandırması eksik: Supabase bağlantısı kurulamadı.' },
-        { status: 500 }
-      );
-    }
-
     const form = await req.formData();
     const coverage = String(form.get('coverage') || '');
     const insuredName = String(form.get('insuredName') || '').trim();
@@ -45,7 +39,7 @@ export async function POST(req: NextRequest) {
     for (const f of rawFiles) {
       if (f.size > MAX_FILE_BYTES) {
         return NextResponse.json(
-          { error: `"${f.name}" dosyası çok büyük (en fazla 25 MB).` },
+          { error: `"${f.name}" dosyası çok büyük (en fazla 4 MB). Lütfen daha küçük bir dosya yükleyin.` },
           { status: 400 }
         );
       }
@@ -69,9 +63,9 @@ export async function POST(req: NextRequest) {
     if (insertErr || !inserted) {
       throw new Error(`Veritabanı kaydı oluşturulamadı: ${insertErr?.message ?? 'bilinmeyen hata'}`);
     }
-    assessmentId = inserted.id as string;
+    const assessmentId = inserted.id as string;
 
-    // 2) Dosyaları depola + analiz için hazırla
+    // 2) Dosyaları depola + analiz için hazırla (bu adım hızlıdır, senkron yapılır)
     const storedFiles: StoredFile[] = [];
     const prepared: PreparedFile[] = [];
 
@@ -88,7 +82,6 @@ export async function POST(req: NextRequest) {
         });
 
       if (uploadErr) {
-        // Depolama hatası analizi engellememeli; not düş
         prepared.push({
           name: file.name,
           mime: file.type,
@@ -108,43 +101,58 @@ export async function POST(req: NextRequest) {
       prepared.push(await prepareFile(file.name, file.type, buffer));
     }
 
-    // 3) Yapay zeka ile risk analizi
-    const { report, model } = await runRiskAssessment({
-      coverage,
-      insuredName,
-      website: website || undefined,
-      freeText: freeText || undefined,
-      files: prepared,
-    });
-
-    // 4) Kaydı tamamla
-    const { error: updateErr } = await supabase
-      .from('assessments')
-      .update({
-        files: storedFiles,
-        report,
-        report_markdown: report.rapor_markdown,
-        risk_score: report.risk_skoru,
-        risk_grade: report.risk_derecesi,
-        status: 'completed',
-        model,
-      })
-      .eq('id', assessmentId);
-
-    if (updateErr) {
-      throw new Error(`Sonuç kaydedilemedi: ${updateErr.message}`);
+    // Dosya meta bilgisini hemen kaydet
+    if (storedFiles.length > 0) {
+      await supabase.from('assessments').update({ files: storedFiles }).eq('id', assessmentId);
     }
 
-    return NextResponse.json({ id: assessmentId, report });
+    // 3) Yapay zeka analizini ARKA PLANDA çalıştır — istek hemen döner.
+    scheduleAnalysis(assessmentId, coverage, insuredName, website, freeText, prepared);
+
+    // İstemciye hemen kayıt ID'sini döndür; istemci sonucu yoklayarak bekleyecek.
+    return NextResponse.json({ id: assessmentId, status: 'processing' });
   } catch (err) {
     const message = (err as Error).message || 'Beklenmeyen bir hata oluştu.';
-    // Kaydı başarısız olarak işaretle
-    if (assessmentId && supabase) {
+    return NextResponse.json({ error: message }, { status: 500 });
+  }
+}
+
+// Analizi yanıt gönderildikten sonra arka planda yürütür (Vercel `after`).
+function scheduleAnalysis(
+  assessmentId: string,
+  coverage: CoverageKey,
+  insuredName: string,
+  website: string,
+  freeText: string,
+  prepared: PreparedFile[]
+) {
+  after(async () => {
+    const supabase = getSupabaseAdmin();
+    try {
+      const { report, model } = await runRiskAssessment({
+        coverage,
+        insuredName,
+        website: website || undefined,
+        freeText: freeText || undefined,
+        files: prepared,
+      });
+
       await supabase
         .from('assessments')
-        .update({ status: 'failed', error: message })
+        .update({
+          report,
+          report_markdown: report.rapor_markdown,
+          risk_score: report.risk_skoru,
+          risk_grade: report.risk_derecesi,
+          status: 'completed',
+          model,
+        })
+        .eq('id', assessmentId);
+    } catch (err) {
+      await supabase
+        .from('assessments')
+        .update({ status: 'failed', error: (err as Error).message })
         .eq('id', assessmentId);
     }
-    return NextResponse.json({ error: message, id: assessmentId }, { status: 500 });
-  }
+  });
 }
