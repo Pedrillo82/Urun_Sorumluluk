@@ -166,17 +166,40 @@ function buildUserContent(input: AssessInput): Anthropic.ContentBlockParam[] {
   return blocks;
 }
 
-function extractJson(text: string): unknown {
+function tryExtractJson(text: string): unknown | null {
   try {
     return JSON.parse(text);
   } catch {
     const start = text.indexOf('{');
     const end = text.lastIndexOf('}');
     if (start >= 0 && end > start) {
-      return JSON.parse(text.slice(start, end + 1));
+      try {
+        return JSON.parse(text.slice(start, end + 1));
+      } catch {
+        return null;
+      }
     }
-    throw new Error('Yapay zeka yanıtı JSON olarak ayrıştırılamadı.');
+    return null;
   }
+}
+
+// Structured output'un geçerli JSON'u SON text bloğundadır; web araması sırasında
+// üretilen ara açıklama metinleri JSON değildir. Bu yüzden blokları sondan başa tarar.
+function parseReportFromContent(content: Anthropic.ContentBlock[]): unknown {
+  const textBlocks = content.filter(
+    (b): b is Anthropic.TextBlock => b.type === 'text' && !!b.text?.trim()
+  );
+  if (textBlocks.length === 0) {
+    throw new Error('Yapay zeka boş yanıt döndürdü.');
+  }
+  for (let i = textBlocks.length - 1; i >= 0; i--) {
+    const parsed = tryExtractJson(textBlocks[i].text);
+    if (parsed && typeof parsed === 'object') return parsed;
+  }
+  const snippet = textBlocks[textBlocks.length - 1].text.slice(0, 200);
+  throw new Error(
+    `Yapay zeka yanıtı JSON olarak ayrıştırılamadı. Yanıtın başı: "${snippet}..."`
+  );
 }
 
 function normalizeReport(raw: any): RiskReport {
@@ -216,7 +239,9 @@ export async function runRiskAssessment(input: AssessInput): Promise<AssessResul
   // output_config henüz SDK tiplerinde olmayabilir; params'i genişletip cast ediyoruz.
   const baseParams = {
     model,
-    max_tokens: 16000,
+    // Uzun raporun (rapor_markdown dahil) yarıda kesilmemesi için geniş çıktı sınırı.
+    // 16k üzeri çıktı için SDK streaming gerektirir; stream + finalMessage kullanıyoruz.
+    max_tokens: 32000,
     system: SYSTEM_PROMPT,
     tools: [{ type: 'web_search_20260209', name: 'web_search', max_uses: 5 }],
     output_config: {
@@ -226,37 +251,29 @@ export async function runRiskAssessment(input: AssessInput): Promise<AssessResul
     },
   };
 
-  let response = await client.messages.create({
-    ...baseParams,
-    messages,
-  } as any);
+  const callClaude = async (): Promise<Anthropic.Message> =>
+    client.messages.stream({ ...baseParams, messages } as any).finalMessage();
+
+  let response = await callClaude();
 
   // Sunucu taraflı araç döngüsü sınırına ulaşırsa devam ettir
   let guard = 0;
   while (response.stop_reason === 'pause_turn' && guard < 6) {
     guard += 1;
     messages.push({ role: 'assistant', content: response.content });
-    response = await client.messages.create({
-      ...baseParams,
-      messages,
-    } as any);
+    response = await callClaude();
   }
 
   if (response.stop_reason === 'refusal') {
     throw new Error('Yapay zeka bu talebi güvenlik nedeniyle reddetti.');
   }
-
-  const text = (response.content as Anthropic.ContentBlock[])
-    .filter((b): b is Anthropic.TextBlock => b.type === 'text')
-    .map((b) => b.text)
-    .join('\n')
-    .trim();
-
-  if (!text) {
-    throw new Error('Yapay zeka boş yanıt döndürdü.');
+  if (response.stop_reason === 'max_tokens') {
+    throw new Error(
+      'Rapor, çıktı uzunluk sınırına takıldı ve tamamlanamadı. Lütfen tekrar deneyin; sorun sürerse daha az belge ile deneyin.'
+    );
   }
 
-  const parsed = extractJson(text);
+  const parsed = parseReportFromContent(response.content as Anthropic.ContentBlock[]);
   const report = normalizeReport(parsed);
   return { report, model };
 }
