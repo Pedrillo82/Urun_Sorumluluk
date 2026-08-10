@@ -218,9 +218,10 @@ export async function runRiskAssessment(input: AssessInput): Promise<AssessResul
     model,
     max_tokens: 16000,
     system: SYSTEM_PROMPT,
-    tools: [{ type: 'web_search_20260209', name: 'web_search', max_uses: 8 }],
+    tools: [{ type: 'web_search_20260209', name: 'web_search', max_uses: 5 }],
     output_config: {
-      effort: 'high',
+      // 'medium' efor + sınırlı web araması, analizi arka plan süre limiti (300s) içinde tutar
+      effort: 'medium',
       format: { type: 'json_schema', schema: REPORT_SCHEMA },
     },
   };

@@ -13,6 +13,28 @@ const COVERAGE_OPTIONS: { key: CoverageKey; label: string; desc: string }[] = [
 
 const ACCEPT = '.pdf,.doc,.docx,.xls,.xlsx,.csv,.jpg,.jpeg,.png,.webp,.txt';
 
+function sleep(ms: number) {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
+// Yanıtı güvenli okur: JSON değilse (ör. HTML hata sayfası) okunaklı bir hata döndürür.
+async function readJsonSafe(res: Response): Promise<any> {
+  const ct = res.headers.get('content-type') || '';
+  if (ct.includes('application/json')) {
+    try {
+      return await res.json();
+    } catch {
+      return null;
+    }
+  }
+  const t = await res.text().catch(() => '');
+  return {
+    error: t
+      ? `Sunucu beklenmeyen bir yanıt döndürdü (${res.status}).`
+      : `Sunucu hatası (${res.status}).`,
+  };
+}
+
 export default function HomePage() {
   const [coverage, setCoverage] = useState<CoverageKey | ''>('');
   const [insuredName, setInsuredName] = useState('');
@@ -61,14 +83,38 @@ export default function HomePage() {
       for (const f of files) fd.append('files', f);
 
       const res = await fetch('/api/assess', { method: 'POST', body: fd });
-      const data = await res.json();
+      const data = await readJsonSafe(res);
 
-      if (!res.ok) {
-        throw new Error(data.error || 'Analiz sırasında bir hata oluştu.');
+      if (!res.ok || !data?.id) {
+        throw new Error(data?.error || 'Analiz başlatılamadı.');
       }
-      setReport(data.report as RiskReport);
-      setRecordId(data.id as string);
-      window.scrollTo({ top: 0, behavior: 'smooth' });
+      const id = data.id as string;
+      setRecordId(id);
+
+      // Analiz arka planda çalışıyor; sonucu yoklayarak bekle.
+      const started = Date.now();
+      const MAX_MS = 5 * 60 * 1000; // 5 dakika
+      // eslint-disable-next-line no-constant-condition
+      while (true) {
+        await sleep(3000);
+        const sres = await fetch(`/api/assess/status?id=${id}`);
+        const sdata = await readJsonSafe(sres);
+        if (sres.ok && sdata) {
+          if (sdata.status === 'completed' && sdata.report) {
+            setReport(sdata.report as RiskReport);
+            window.scrollTo({ top: 0, behavior: 'smooth' });
+            break;
+          }
+          if (sdata.status === 'failed') {
+            throw new Error(sdata.error || 'Analiz başarısız oldu.');
+          }
+        }
+        if (Date.now() - started > MAX_MS) {
+          throw new Error(
+            'Analiz beklenenden uzun sürdü. Birazdan "Kayıtlar" sayfasından sonucu kontrol edebilirsiniz.'
+          );
+        }
+      }
     } catch (e) {
       setError((e as Error).message);
     } finally {
