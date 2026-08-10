@@ -8,6 +8,12 @@ import type { AssessmentRecord } from '@/lib/types';
 
 export const dynamic = 'force-dynamic';
 
+// 6 dakikayı aşan 'processing' kayıtlar: arka plan işi sunucu süre sınırında
+// öldürülmüş demektir — açıldıklarında otomatik 'failed' işaretlenir.
+const STALE_MS = 6 * 60 * 1000;
+const STALE_MESSAGE =
+  'Analiz zaman aşımına uğradı (sunucu süre sınırı). Lütfen tekrar deneyin; sorun sürerse daha az belge ile deneyin.';
+
 async function fetchRecord(id: string): Promise<AssessmentRecord | null> {
   try {
     const supabase = getSupabaseAdmin();
@@ -17,7 +23,22 @@ async function fetchRecord(id: string): Promise<AssessmentRecord | null> {
       .eq('id', id)
       .single();
     if (error || !data) return null;
-    return data as AssessmentRecord;
+    const record = data as AssessmentRecord;
+
+    if (
+      record.status === 'processing' &&
+      Date.now() - new Date(record.created_at).getTime() > STALE_MS
+    ) {
+      await supabase
+        .from('assessments')
+        .update({ status: 'failed', error: STALE_MESSAGE })
+        .eq('id', id)
+        .eq('status', 'processing');
+      record.status = 'failed';
+      record.error = STALE_MESSAGE;
+    }
+
+    return record;
   } catch {
     return null;
   }
